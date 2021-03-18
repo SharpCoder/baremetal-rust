@@ -1,11 +1,20 @@
 #![feature(lang_items, asm)]
 #![crate_type = "staticlib"]
 #![no_std]
-mod clocks;
-mod interrupts;
-mod platform;
 mod timer;
 
+/* 
+Static memory locations and offsets
+*/
+const CM_PER: u32 = 0x44E0_0000; // Base addr for clock
+const DMTIMER2: u32 = 0x4804_0000; // Base addr for timer2
+const INTCPS: u32 = 0x4820_0000; // Base addr for interrupt
+const CM_PER_L4LS_CLKSTCTRL: u32 = 0x0; // CM_PER offset
+const CM_PER_TIMER2_CLKCTRL: u32 = 0x80; // CM_PER offset
+const INTC_CONTROL: u32 = 0x48;
+const INTC_MIR_CLEAR2: u32 = 0xC8;
+
+/* Helper constants */
 const CLOCK_RELOAD_VALUE: u32 = 0xFFFF_FFDF;
 static mut sysclock: timer::Timer = timer::Timer::new(platform::DMTIMER2);
 
@@ -23,8 +32,8 @@ pub fn kmain() {
 
 fn initialize_platform() {
     unsafe {
-        *((platform::CM_PER + clocks::CM_PER_L4LS_CLKSTCTRL) as *mut u32) = 0x2;
-        *((platform::CM_PER + clocks::CM_PER_TIMER2_CLKCTRL) as *mut u32) = 0x2;
+        *((CM_PER + CM_PER_L4LS_CLKSTCTRL) as *mut u32) = 0x2;
+        *((CM_PER + CM_PER_TIMER2_CLKCTRL) as *mut u32) = 0x2;
     }
 }
 
@@ -33,18 +42,26 @@ fn initialize_interrupts() {
     sysclock.stop();
     sysclock.set_load_value(CLOCK_RELOAD_VALUE);
     sysclock.set_value(CLOCK_RELOAD_VALUE);
-    sysclock.configure(timer::ENABLE_AUTO_RELOAD | timer::IRQ_OVERFLOW_MODE);
+    sysclock.configure(
+        timer::ENABLE_AUTO_RELOAD | timer::IRQ_OVERFLOW_MODE
+    );
     sysclock.irq_enable();
 
     // Wire up register
-    interrupts::register_handler(interrupts::INT_DMTIMER2, handle_timer_irq);
-    interrupts::unmask_interrupt(interrupts::INT_DMTIMER2);
+    unsafe {
+        // Unmask INT2 interrupt (DMTIMER2) which allows
+        // interrupts generated from the timer to
+        // propagate.
+        *((INTCPS + INTC_MIR_CLEAR2) as *mut u32) = 0x4;
+    }
 
     // Start the clock
     sysclock.start();
 }
 
-fn handle_timer_irq() {
+#[no_mangle]
+fn handle_irq_rust() {
+    // Increment timer and reload value
     sysclock.irq_disable();
     sysclock.stop();
     sysclock.irq_acknowledge();
@@ -53,13 +70,11 @@ fn handle_timer_irq() {
     sysclock.incr();
     sysclock.irq_enable();
     sysclock.start();
-}
-
-#[no_mangle]
-fn handle_irq_rust() {
-    let int_number = interrupts::get_active_irq_number();
-    interrupts::service_handler(int_number);
-    interrupts::clear_interrupts();
+    
+    // Clear interrupts
+    unsafe {
+        *((INTCPS + INTC_CONTROL) as *mut u32) = 0x1;
+    }
 }
 
 #[lang = "eh_personality"]
